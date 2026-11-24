@@ -43,7 +43,7 @@
 | AI Agent | [Claude Code](https://claude.com/claude-code) (แนะนำ) หรือ Codex / Antigravity |
 | อื่นๆ | ffmpeg, whisper.cpp และโมเดลเสียงภาษาไทย → **skill ติดตั้งให้เอง** |
 
-⚠️ ยังไม่รองรับ Windows เพราะ CapCut บน Windows เข้ารหัสไฟล์ project ไว้ อ่านไม่ได้
+⚠️ ตอนนี้ **ทดสอบแล้วเฉพาะบน macOS** ส่วน Windows กำลังเพิ่มการรองรับ (ยังไม่ได้ทดสอบบนเครื่องจริง)
 
 ---
 
@@ -177,7 +177,7 @@ python3 scripts/ncr.py compare "1122 rough cut v1" # เทียบกับท
 
 ## ⚠️ ข้อจำกัด
 
-- **macOS เท่านั้น** และ CapCut ที่เก็บ project เป็นไฟล์ JSON ปกติ
+- **ทดสอบแล้วเฉพาะ macOS** (Windows ยังไม่ได้ทดสอบ) และต้องเป็น CapCut ที่เก็บ project เป็นไฟล์ JSON ปกติ
 - ตัดเฉพาะคลิปบน **track หลัก** ของ Timeline ของบน track อื่น (ข้อความ เพลง) จะอยู่ตำแหน่งเดิม จึงควรตัดก่อนใส่ของพวกนี้
 - คลิปที่ปรับความเร็ว (speed) จะไม่ถูกตัด
 - ถอดเสียง **ภาษาไทย** เท่านั้น
