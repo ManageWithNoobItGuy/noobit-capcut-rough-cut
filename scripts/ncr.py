@@ -8,13 +8,24 @@ Pipeline:
   doctor --install -> projects -> prepare NAME --max-min N -> (read transcript, write edits.json)
   -> estimate -> build -> qa -> [user finishes in CapCut] -> compare (optional)
 
-Requires: macOS, python3 (stdlib only), ffmpeg, whisper-cli (whisper.cpp) + ggml-large-v3.bin.
-`doctor --install` installs the missing ones (Homebrew + a 3 GB model download).
+Requires: python3 (stdlib only), ffmpeg, whisper-cli (whisper.cpp) + ggml-large-v3.bin.
+`doctor --install` installs the missing ones (macOS: Homebrew, Windows: winget + the official whisper.cpp
+build) and downloads the 3 GB model. Tested on macOS; Windows support is written but not yet tested.
 """
-import argparse, copy, json, os, platform, re, shutil, subprocess, sys, time, uuid
+import argparse, copy, json, os, platform, re, shutil, subprocess, sys, time, urllib.request, uuid, zipfile
 
-# Homebrew is often missing from PATH in non-login shells (agents, IDEs)
-for _p in ("/opt/homebrew/bin", "/usr/local/bin"):
+IS_WIN = platform.system() == "Windows"
+IS_MAC = platform.system() == "Darwin"
+for _s in (sys.stdout, sys.stderr):   # Windows consoles default to cp874/cp1252: Thai + emoji would crash print()
+    try: _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError): pass
+
+LOCAL = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
+TOOLS_DIR = os.path.join(LOCAL, "noobit-rough-cut") if IS_WIN else os.path.expanduser("~/.local/share/noobit-rough-cut")
+# tools installed by Homebrew / winget are often missing from PATH in non-login shells and in the shell that installed them
+_extra = ["/opt/homebrew/bin", "/usr/local/bin"] if not IS_WIN else \
+         [os.path.join(LOCAL, "Microsoft", "WinGet", "Links"), os.path.join(TOOLS_DIR, "whisper", "Release")]
+for _p in _extra:
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _p
 
@@ -42,10 +53,16 @@ MODEL_CANDIDATES = [os.environ.get("NCR_WHISPER_MODEL"), os.environ.get("NVE_WHI
                     "/opt/homebrew/share/whisper-cpp/" + MODEL_FILE, "/usr/local/share/whisper-cpp/" + MODEL_FILE]
 WHISPER_BIN = os.environ.get("NCR_WHISPER_BIN", "whisper-cli")
 THREADS = str(min(8, os.cpu_count() or 4))
+WHISPER_REPO = "ggml-org/whisper.cpp"   # Windows: official prebuilt zips live on the bNNNN pre-releases
+WHISPER_ZIP = "whisper-bin-win-cpu-arm64.zip" if IS_WIN and platform.machine().lower() in ("arm64", "aarch64") \
+    else "whisper-bin-x64.zip"
 
-DRAFTS = os.path.expanduser(os.environ.get("NCR_DRAFTS", "~/Movies/CapCut/User Data/Projects/com.lveditor.draft"))
-HOME_DIR = os.path.expanduser(os.environ.get("NCR_HOME", "~/Movies/noobit-rough-cut"))
+_DEF_DRAFTS = os.path.join(LOCAL, "CapCut", "User Data", "Projects", "com.lveditor.draft") if IS_WIN \
+    else "~/Movies/CapCut/User Data/Projects/com.lveditor.draft"
+DRAFTS = os.path.expanduser(os.environ.get("NCR_DRAFTS", _DEF_DRAFTS))
+HOME_DIR = os.path.expanduser(os.environ.get("NCR_HOME", "~/Videos/noobit-rough-cut" if IS_WIN else "~/Movies/noobit-rough-cut"))
 DRAFT_FILES = ("draft_info.json", "draft_content.json")
+QUIT_KEY = "กดปุ่ม X มุมขวาบน หรือ Alt+F4 แล้วเช็กว่าไม่มีไอคอน CapCut ค้างที่มุมขวาล่างของ taskbar" if IS_WIN else "Cmd+Q"
 US = 1_000_000
 
 STEPS = [
@@ -66,7 +83,17 @@ def die(msg, code=1):
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    # explicit UTF-8: whisper prints Thai as UTF-8, but Windows would decode it with the ANSI code page
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
+
+
+def norm_path(x):
+    return os.path.normcase(os.path.normpath(x or ""))
+
+
+def path_like(sample, path):
+    """Write a path in the same slash style CapCut used in `sample` (Windows CapCut may store C:/Users/...)."""
+    return path.replace("\\", "/") if IS_WIN and sample and "/" in sample and "\\" not in sample else path
 
 
 def tc(sec):
@@ -79,7 +106,11 @@ def uid():
 
 
 def safe(name):
-    return re.sub(r"[^\w.-]+", "_", name).strip("_") or "project"
+    """ASCII-only folder/file name: whisper.cpp on Windows cannot open paths with Thai characters."""
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    if s != name.replace(" ", "_"):   # had non-ASCII: add a short stable tag so two Thai names don't collide
+        s = f"{s}_{sum(ord(c) * (i + 1) for i, c in enumerate(name)) % 99991:05d}".strip("_")
+    return s or "project"
 
 
 # ---------------------------------------------------------------- work dir
@@ -124,12 +155,25 @@ def find_work(args):
 
 
 # ---------------------------------------------------------------- CapCut drafts
-def draft_file(d):
-    for n in DRAFT_FILES:
-        fp = os.path.join(d, n)
-        if os.path.exists(fp):
-            return fp
-    return None
+def is_plain_json(fp):
+    """CapCut International stores plain JSON. JianYing (剪映) 6.0+ stores an encrypted blob that does not start
+    with '{' (detection rule from capcut-cli). Windows builds may keep a plain draft_info.json next to encrypted
+    mirrors (draft_content.json, template-2.tmp)."""
+    try:
+        with open(fp, "rb") as f:
+            head = f.read(64).lstrip(b"\xef\xbb\xbf \t\r\n")
+        return head.startswith(b"{")
+    except OSError:
+        return False
+
+
+def draft_file(d, plain_only=True):
+    """The draft's timeline JSON: draft_info.json (CapCut 6+, macOS + Windows) or draft_content.json (older /
+    some Windows builds). Prefers a plain-JSON one."""
+    found = [os.path.join(d, n) for n in DRAFT_FILES if os.path.exists(os.path.join(d, n))]
+    for fp in found:
+        if is_plain_json(fp): return fp
+    return None if plain_only else (found[0] if found else None)
 
 
 def draft_dir(x):
@@ -138,15 +182,22 @@ def draft_dir(x):
     d = os.path.join(DRAFTS, x)
     if draft_file(d):
         return d
+    if draft_file(d, plain_only=False):
+        die(ENCRYPTED_MSG.format(fp=draft_file(d, plain_only=False)), 5)
     die(f"CapCut project not found: '{x}' (looked in {DRAFTS}) - run `ncr.py projects` to see the names")
+
+
+ENCRYPTED_MSG = ("{fp} เป็นไฟล์ที่ถูกเข้ารหัส (เกิดกับ 剪映/JianYing 6.0 ขึ้นไป หรือ CapCut บางเวอร์ชัน) skill นี้อ่านไม่ได้ "
+                 "- ใช้ CapCut International (capcut.com) ที่เก็บ project เป็น JSON ปกติ")
 
 
 def load_draft(d):
     fp = draft_file(d)
+    if not fp: die(ENCRYPTED_MSG.format(fp=draft_file(d, plain_only=False) or d), 5)
     try:
-        return json.load(open(fp, encoding="utf-8"))
+        return json.load(open(fp, encoding="utf-8-sig"))
     except (ValueError, UnicodeDecodeError):
-        die(f"{fp} is not plain JSON (this CapCut version encrypts its projects) - this skill cannot read it")
+        die(f"{fp} อ่านเป็น JSON ไม่ได้ (ไฟล์อาจเสีย) - ลองเปิด project นี้ใน CapCut แล้วปิดอีกครั้ง")
 
 
 def mats_by_id(d):
@@ -167,10 +218,13 @@ def main_video_track(d):
 
 
 def capcut_running():
-    if platform.system() != "Darwin":
-        return False
-    r = run(["pgrep", "-f", "CapCut.app/Contents/MacOS/CapCut$"])
-    return bool(r.stdout.strip())
+    if IS_WIN:   # CapCut.exe (CapCut International) / JianyingPro.exe
+        r = run(["tasklist", "/FO", "CSV", "/NH"])
+        names = {l.split(",")[0].strip('"').lower() for l in r.stdout.splitlines() if l}
+        return bool(names & {"capcut.exe", "jianyingpro.exe"})
+    if IS_MAC:
+        return bool(run(["pgrep", "-f", "CapCut.app/Contents/MacOS/CapCut$"]).stdout.strip())
+    return False
 
 
 def clone(D, b, start_us, dur_us, src=None):
@@ -244,9 +298,10 @@ def analyse_audio(p, stem, media):
     r = run(["ffmpeg", "-nostats", "-i", wav, "-af", f"silencedetect=noise={SPEECH_DB}dB:d=0.12", "-f", "null", "-"])
     open(p.f(f"{stem}.sil"), "w").write("\n".join(l for l in r.stderr.splitlines() if "silence_" in l))
     raw = p.f(f"{stem}.rmsraw")
+    # file= sits inside the filter string: a Windows path ("C:\...") would break filter parsing -> relative name + cwd
     run(["ffmpeg", "-nostats", "-i", wav, "-af",
-         f"asetnsamples=800,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file={raw}",
-         "-f", "null", "-"])
+         f"asetnsamples=800,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file={stem}.rmsraw",
+         "-f", "null", "-"], cwd=p.work)
     out, t = [], None
     for l in open(raw):
         m = re.search(r"pts_time:([\d.]+)", l)
@@ -284,18 +339,29 @@ def whisper_model(arg=None):
     return m
 
 
+def whisper_bin():
+    if os.path.isabs(WHISPER_BIN) or shutil.which(WHISPER_BIN):
+        return WHISPER_BIN
+    local = os.path.join(TOOLS_DIR, "whisper", "Release", "whisper-cli.exe")   # Windows: installed by doctor --install
+    return local if os.path.exists(local) else WHISPER_BIN
+
+
 def whisper(wav, out_prefix, model, dtw=True):
-    cmd = [WHISPER_BIN, "-m", model, "-f", wav, "--language", "th", "--output-json-full", "-of", out_prefix, "-t", THREADS]
+    # wav/out are passed relative to cwd: whisper.cpp on Windows cannot open paths with non-ASCII characters
+    d = os.path.dirname(wav)
+    cmd = [whisper_bin(), "-m", model, "-f", os.path.basename(wav), "--language", "th", "--output-json-full",
+           "-of", os.path.relpath(out_prefix, d), "-t", THREADS]
     if dtw:  # flash attention silently disables DTW -> must pass -nfa
         cmd += ["--dtw", "large.v3", "-nfa"]
-    r = run(cmd)
+    r = run(cmd, cwd=d)
     if r.returncode and dtw:  # DTW sometimes asserts on tiny segments -> retry without word timing
         return whisper(wav, out_prefix, model, dtw=False)
     return r.returncode == 0
 
 
 def whisper_text(model, wav):
-    return run([WHISPER_BIN, "-m", model, "-f", wav, "--language", "th", "-nt", "-t", THREADS]).stdout
+    return run([whisper_bin(), "-m", model, "-f", os.path.basename(wav), "--language", "th", "-nt", "-t", THREADS],
+               cwd=os.path.dirname(wav)).stdout
 
 
 def plan_chunks(sil, dur, size=300.0):
@@ -472,22 +538,48 @@ def cmd_steps(args):
         print(f"{mark} {i}. {s}")
 
 
+def whisper_ok():
+    b = whisper_bin()
+    return bool(shutil.which(b) or os.path.exists(b))
+
+
 def check_tools():
-    rows = []
-    rows.append(("macOS", platform.system() == "Darwin", platform.mac_ver()[0] or platform.system()))
-    rows.append(("Python 3.8+", sys.version_info >= (3, 8), sys.version.split()[0]))
-    rows.append(("Homebrew", bool(shutil.which("brew")), shutil.which("brew") or "-"))
-    for t in ("ffmpeg", "ffprobe", WHISPER_BIN):
-        rows.append((t, bool(shutil.which(t)), shutil.which(t) or "-"))
+    """-> [(key, label, ok, info)]"""
+    rows = [("os", "macOS / Windows", IS_MAC or IS_WIN, f"{platform.system()} {platform.release()}"),
+            ("python", "Python 3.8+", sys.version_info >= (3, 8), sys.version.split()[0])]
+    if IS_WIN: rows.append(("pm", "winget", bool(shutil.which("winget")), shutil.which("winget") or "-"))
+    else: rows.append(("pm", "Homebrew", bool(shutil.which("brew")), shutil.which("brew") or "-"))
+    for t in ("ffmpeg", "ffprobe"):
+        rows.append((t, t, bool(shutil.which(t)), shutil.which(t) or "-"))
+    rows.append(("whisper", "whisper-cli (whisper.cpp)", whisper_ok(), shutil.which(whisper_bin()) or
+                 (whisper_bin() if os.path.exists(whisper_bin()) else "-")))
     m = find_model()
-    rows.append((f"Whisper model ({MODEL_FILE}, 3 GB)", bool(m), m or "-"))
-    rows.append(("CapCut projects folder", os.path.isdir(DRAFTS), DRAFTS))
+    rows.append(("model", f"Whisper model ({MODEL_FILE}, 3 GB)", bool(m), m or "-"))
+    rows.append(("drafts", "CapCut projects folder", os.path.isdir(DRAFTS), DRAFTS))
     return rows
 
 
 def print_rows(rows):
-    for name, ok, info in rows:
+    for _, name, ok, info in rows:
         print(f"{'✅' if ok else '❌'} {name:36s} {info}")
+
+
+def http_get(url, dst=None, start=0):
+    # curl (macOS, Windows 10+) uses the OS certificate store; python.org builds of Python often have no CA certs
+    if shutil.which("curl"):
+        cmd = ["curl", "-sSL", "--fail", "--retry", "3", "-A", "noobit-capcut-rough-cut"] + (["-C", str(start)] if start else [])
+        if dst is None:
+            r = subprocess.run(cmd + [url], capture_output=True)
+            if r.returncode: raise OSError(f"download failed: {url} ({r.stderr.decode('utf-8', 'replace').strip()})")
+            return r.stdout
+        if subprocess.run(cmd + ["-o", dst, url]).returncode: raise OSError(f"download failed: {url}")
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "noobit-capcut-rough-cut"})
+    if start: req.add_header("Range", f"bytes={start}-")
+    r = urllib.request.urlopen(req, timeout=60)
+    if dst is None: return r.read()
+    with open(dst, "ab" if start else "wb") as f:
+        shutil.copyfileobj(r, f, 1 << 20)
 
 
 def download_model():
@@ -499,10 +591,15 @@ def download_model():
     if free < MODEL_BYTES - have + 500_000_000:
         die(f"พื้นที่ดิสก์ไม่พอ: ต้องการ ~{(MODEL_BYTES - have) / 1e9 + 0.5:.1f} GB เหลือ {free / 1e9:.1f} GB")
     print(f"⬇️  กำลังดาวน์โหลด Whisper model (~3.1 GB) ไปที่ {dst}\n   (ดาวน์โหลดต่อจากเดิมได้ถ้าเน็ตหลุด แค่สั่งใหม่อีกครั้ง)", flush=True)
-    r = subprocess.run(["curl", "-L", "--fail", "-C", "-", "--retry", "3", "--progress-bar", "-o", part, MODEL_URL]) \
-        if have != MODEL_BYTES else subprocess.CompletedProcess([], 0)
-    if r.returncode not in (0, 33) or not os.path.exists(part):
-        die("ดาวน์โหลด model ไม่สำเร็จ - ลองสั่ง `ncr.py doctor --install` ใหม่อีกครั้ง")
+    if have != MODEL_BYTES:
+        if shutil.which("curl"):   # macOS and Windows 10+ ship curl
+            r = subprocess.run(["curl", "-L", "--fail", "-C", "-", "--retry", "3", "--progress-bar", "-o", part, MODEL_URL])
+            ok = r.returncode in (0, 33)
+        else:
+            try: http_get(MODEL_URL, part, have); ok = True
+            except OSError as e: print(f"  ! {e}"); ok = False
+        if not ok or not os.path.exists(part):
+            die("ดาวน์โหลด model ไม่สำเร็จ - ลองสั่ง `ncr.py doctor --install` ใหม่อีกครั้ง")
     size = os.path.getsize(part)
     if size != MODEL_BYTES:
         die(f"ไฟล์ model ไม่ครบ ({size} / {MODEL_BYTES} bytes) - สั่ง `ncr.py doctor --install` ใหม่เพื่อโหลดต่อ")
@@ -510,38 +607,84 @@ def download_model():
     print(f"✅ model พร้อมใช้: {dst}")
 
 
+def winget(pkg_id):
+    print(f"\n📦 winget install {pkg_id}", flush=True)
+    return subprocess.run(["winget", "install", "-e", "--id", pkg_id, "--silent",
+                           "--accept-source-agreements", "--accept-package-agreements"]).returncode
+
+
+def install_whisper_windows():
+    """Official prebuilt whisper.cpp for Windows: the newest release that carries WHISPER_ZIP (the zips are attached
+    to the bNNNN pre-releases, not to every vX.Y.Z), unpacked to TOOLS_DIR/whisper/Release/whisper-cli.exe."""
+    rel = json.loads(http_get(f"https://api.github.com/repos/{WHISPER_REPO}/releases?per_page=20"))
+    asset = next((a for r in rel for a in r.get("assets", []) if a["name"] == WHISPER_ZIP), None)
+    if not asset: die(f"ไม่เจอไฟล์ {WHISPER_ZIP} ใน release ของ whisper.cpp - ดาวน์โหลดเองจาก https://github.com/{WHISPER_REPO}/releases")
+    dst = os.path.join(TOOLS_DIR, "whisper")
+    os.makedirs(TOOLS_DIR, exist_ok=True)
+    z = os.path.join(TOOLS_DIR, WHISPER_ZIP)
+    print(f"\n⬇️  {asset['browser_download_url']}", flush=True)
+    http_get(asset["browser_download_url"], z)
+    shutil.rmtree(dst, ignore_errors=True)
+    with zipfile.ZipFile(z) as zf: zf.extractall(dst)
+    os.remove(z)
+    exe = next((os.path.join(r, f) for r, _, fs in os.walk(dst) for f in fs if f.lower() == "whisper-cli.exe"), None)
+    if not exe: die(f"ไม่เจอ whisper-cli.exe ใน {WHISPER_ZIP}")
+    want = os.path.join(dst, "Release", "whisper-cli.exe")
+    if norm_path(exe) != norm_path(want):   # keep the layout whisper_bin() expects
+        shutil.move(os.path.dirname(exe), os.path.join(dst, "Release"))
+    try: starts = run([want, "-h"]).returncode in (0, 1)
+    except OSError: starts = False
+    if not starts and IS_WIN and shutil.which("winget"):
+        winget("Microsoft.VCRedist.2015+.x64")   # the MSVC runtime the prebuilt exe needs
+    print(f"✅ whisper-cli: {want}")
+
+
 def cmd_doctor(args):
     rows = check_tools()
     print("🔎 เช็กโปรแกรมที่ต้องใช้\n")
     print_rows(rows)
-    bad = {n for n, ok, _ in rows if not ok}
+    bad = {k for k, _, ok, _ in rows if not ok} - {"pm"}   # the package manager only matters if something is missing
     if not bad:
         print("\nพร้อมใช้งานครบแล้ว ✅"); return
-    if "macOS" in bad:
-        die("skill นี้รองรับเฉพาะ macOS (CapCut บน Windows เข้ารหัสไฟล์ project ไว้ อ่านไม่ได้)", 3)
-    if "CapCut projects folder" in bad:
+    if "os" in bad:
+        die("skill นี้รองรับเฉพาะ macOS และ Windows", 3)
+    if "drafts" in bad:
         print(f"\n! ไม่เจอโฟลเดอร์ project ของ CapCut: {DRAFTS}\n  ติดตั้ง CapCut (https://www.capcut.com) แล้วสร้าง project อย่างน้อย 1 อันก่อน"
-              "\n  หรือถ้าย้ายที่เก็บ project ไว้ ให้ตั้ง NCR_DRAFTS=/path/to/com.lveditor.draft")
+              "\n  ถ้าเคยเปลี่ยนที่เก็บ project (CapCut > Settings > ตำแหน่งเก็บ Draft) ให้ตั้งตัวแปร NCR_DRAFTS เป็นโฟลเดอร์นั้น")
     if not args.install:
         print("\nสั่ง `ncr.py doctor --install` เพื่อติดตั้งตัวที่ขาดให้อัตโนมัติ"); sys.exit(1)
-    pkgs = []
-    if bad & {"ffmpeg", "ffprobe"}: pkgs.append("ffmpeg")
-    if WHISPER_BIN in bad: pkgs.append("whisper-cpp")
-    if pkgs:
-        if not shutil.which("brew"):
-            print("\n❗ ต้องติดตั้ง Homebrew ก่อน (ต้องใส่รหัสผ่านเครื่อง จึงต้องให้ผู้ใช้รันเองใน Terminal):\n\n"
-                  '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n\n'
-                  "ติดตั้งเสร็จแล้วสั่ง `ncr.py doctor --install` อีกครั้ง")
-            sys.exit(2)
-        print(f"\n📦 brew install {' '.join(pkgs)}", flush=True)
-        r = subprocess.run(["brew", "install"] + pkgs)
-        if r.returncode: die("brew install ไม่สำเร็จ - ดูข้อความ error ด้านบน")
+    need_ff = bool(bad & {"ffmpeg", "ffprobe"})
+    if IS_WIN:
+        if need_ff:
+            if not shutil.which("winget"):
+                print("\n❗ เครื่องนี้ไม่มี winget - เปิด Microsoft Store ค้นหา \"App Installer\" แล้วกดติดตั้ง/อัปเดต"
+                      "\n   เสร็จแล้วเปิดหน้าต่าง PowerShell ใหม่ และสั่ง `ncr.py doctor --install` อีกครั้ง")
+                sys.exit(2)
+            if winget("Gyan.FFmpeg"): die("winget install ffmpeg ไม่สำเร็จ - ดูข้อความ error ด้านบน")
+            links = os.path.join(LOCAL, "Microsoft", "WinGet", "Links")
+            if links not in os.environ["PATH"].split(os.pathsep): os.environ["PATH"] += os.pathsep + links
+        if "whisper" in bad:
+            install_whisper_windows()
+    else:
+        pkgs = (["ffmpeg"] if need_ff else []) + (["whisper-cpp"] if "whisper" in bad else [])
+        if pkgs:
+            if not shutil.which("brew"):
+                print("\n❗ ต้องติดตั้ง Homebrew ก่อน (ต้องใส่รหัสผ่านเครื่อง จึงต้องให้ผู้ใช้รันเองใน Terminal):\n\n"
+                      '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n\n'
+                      "ติดตั้งเสร็จแล้วสั่ง `ncr.py doctor --install` อีกครั้ง")
+                sys.exit(2)
+            print(f"\n📦 brew install {' '.join(pkgs)}", flush=True)
+            if subprocess.run(["brew", "install"] + pkgs).returncode: die("brew install ไม่สำเร็จ - ดูข้อความ error ด้านบน")
     if not find_model():
         download_model()
     rows = check_tools()
     print("\n🔎 เช็กอีกรอบ\n"); print_rows(rows)
-    if all(ok for n, ok, _ in rows): print("\nพร้อมใช้งานครบแล้ว ✅")
-    else: sys.exit(1)
+    left = [k for k, _, ok, _ in rows if not ok and k not in ("pm",)]
+    if not left: print("\nพร้อมใช้งานครบแล้ว ✅")
+    else:
+        if IS_WIN and set(left) & {"ffmpeg", "ffprobe"}:
+            print("\n(ffmpeg เพิ่งติดตั้ง: ถ้ายังไม่เจอ ให้ปิดแล้วเปิดหน้าต่าง PowerShell / AI agent ใหม่ แล้วเช็กอีกครั้ง)")
+        sys.exit(1)
 
 
 def cmd_projects(args):
@@ -549,26 +692,28 @@ def cmd_projects(args):
     out = []
     for name in os.listdir(DRAFTS):
         d = os.path.join(DRAFTS, name)
-        fp = draft_file(d) if os.path.isdir(d) else None
+        fp = draft_file(d, plain_only=False) if os.path.isdir(d) else None
         if not fp: continue
+        enc = not draft_file(d)
         dur = 0
         mp = os.path.join(d, "draft_meta_info.json")
         if os.path.exists(mp):
-            try: dur = json.load(open(mp, encoding="utf-8")).get("tm_duration", 0) / US
+            try: dur = json.load(open(mp, encoding="utf-8-sig")).get("tm_duration", 0) / US
             except ValueError: pass
-        out.append((os.path.getmtime(fp), name, dur))
+        out.append((os.path.getmtime(fp), name, dur, enc))
     if not out: die("ยังไม่มี project ใน CapCut - เปิด CapCut สร้าง project แล้ววางคลิปลง timeline ก่อน")
     out.sort(reverse=True)
     print(f"Project ใน CapCut (ล่าสุดอยู่บน) - {DRAFTS}\n")
-    for mt, name, dur in out[:args.limit]:
+    for mt, name, dur, enc in out[:args.limit]:
         tag = "  (ผลลัพธ์จาก skill นี้)" if re.search(r" rough cut v\d+$", name) else ""
+        if enc: tag += "  🔒 ไฟล์ถูกเข้ารหัส ตัดไม่ได้"
         print(f"  {name:32s} {tc(dur):>8s}   แก้ล่าสุด {time.strftime('%Y-%m-%d %H:%M', time.localtime(mt))}{tag}")
     print(f"\nCapCut ตอนนี้: {'🔴 เปิดอยู่' if capcut_running() else '🟢 ปิดแล้ว'}")
 
 
 def cmd_capcut(args):
     if capcut_running():
-        print("🔴 CapCut ยังเปิดอยู่ - ต้องปิด CapCut ก่อน (Cmd+Q) ไม่อย่างนั้นตอนปิด CapCut จะเขียนทับรายการ project และ project ใหม่จะหาย")
+        print(f"🔴 CapCut ยังเปิดอยู่ - ต้องปิด CapCut ก่อน ({QUIT_KEY}) ไม่อย่างนั้นตอนปิด CapCut จะเขียนทับรายการ project และ project ใหม่จะหาย")
         sys.exit(1)
     print("🟢 CapCut ปิดแล้ว พร้อมสร้าง project ใหม่")
 
@@ -612,7 +757,7 @@ def cmd_prepare(args):
         ed["profiles"].setdefault(stem, args.profile); ed["edits"].setdefault(stem, [])
     json.dump(ed, open(p.f("edits.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     raw = sum(it["src_out"] - it["src_in"] for it in items)
-    est, _ = estimate(p, ed)
+    est, _ = estimate(p, dict(profiles=ed["profiles"], edits={}))   # pauses only
     print(f"\nwork dir: {p.work}\ntranscript: {', '.join(p.f(s + '.transcript.txt') for s in media)}\nedits: {p.f('edits.json')}")
     print(f"ความยาวเดิม {tc(raw)} -> ถ้าตัดแค่ช่วงเงียบ ~{tc(est)}" +
           (f" | เป้าหมาย ≤ {p.data['max_min']:g} นาที" if p.data.get("max_min") else ""))
@@ -666,7 +811,7 @@ def cmd_spot(args):
     p = find_work(args)
     tmp = p.f("spot.wav")
     run(["ffmpeg", "-v", "error", "-y", "-ss", str(args.start), "-to", str(args.end), "-i", p.f(f"{args.clip}.wav"), tmp])
-    r = run([WHISPER_BIN, "-m", whisper_model(), "-f", tmp, "--language", "th", "-t", THREADS])
+    r = run([whisper_bin(), "-m", whisper_model(), "-f", os.path.basename(tmp), "--language", "th", "-t", THREADS], cwd=p.work)
     print(r.stdout.strip() or "(no speech)")
 
 
@@ -810,7 +955,7 @@ def cmd_fit(args):
 def cmd_build(args):
     p = find_work(args); ed = p.edits()
     if capcut_running() and not args.force:
-        die("🔴 CapCut ยังเปิดอยู่ - ปิด CapCut ก่อน (Cmd+Q) แล้วสั่งใหม่ (CapCut เขียนทับรายการ project ตอนปิด project ใหม่จะหาย)", 4)
+        die(f"🔴 CapCut ยังเปิดอยู่ - ปิด CapCut ก่อน ({QUIT_KEY}) แล้วสั่งใหม่ (CapCut เขียนทับรายการ project ตอนปิด project ใหม่จะหาย)", 4)
     src_dir = p.data["draft"]; D = load_draft(src_dir)
     items_now, _ = draft_items(D)
     if [(it["seg"], round(it["src_in"], 3), round(it["src_out"], 3)) for it in items_now] != [tuple(x) for x in p.data["draft_sig"]]:
@@ -870,9 +1015,10 @@ def cmd_build(args):
         shutil.rmtree(dst)
     shutil.copytree(src_dir, dst)
     meta_p = os.path.join(dst, "draft_meta_info.json")
-    meta = json.load(open(meta_p, encoding="utf-8")) if os.path.exists(meta_p) else {}
+    jload = lambda fp: json.load(open(fp, encoding="utf-8-sig")) if os.path.exists(fp) and is_plain_json(fp) else {}
+    meta = jload(meta_p)
     proj_p = os.path.join(dst, "Timelines", "project.json")
-    proj = json.load(open(proj_p, encoding="utf-8")) if os.path.exists(proj_p) else {}
+    proj = jload(proj_p)
     old_ids2 = [x for x in (D.get("id"), meta.get("draft_id"), proj.get("id")) if x]
     swap = {o: uid() for o in old_ids2}
     D["id"] = swap.get(D.get("id"), uid())
@@ -890,30 +1036,37 @@ def cmd_build(args):
             for o, n2 in swap.items(): new = new.replace(o, n2)
             if new != txt: open(fp, "w", encoding="utf-8").write(new)
     dname = os.path.basename(draft_file(src_dir))
-    targets = [dname, dname + ".bak", "template-2.tmp"]
+    targets = [n for f in DRAFT_FILES for n in (f, f + ".bak")] + ["template-2.tmp"]
+    skipped = []
     for base in [dst, os.path.join(tdir, D["id"])]:
         for x in targets:
             fp = os.path.join(base, x)
-            if os.path.exists(fp): open(fp, "w", encoding="utf-8").write(body)
+            if not os.path.exists(fp): continue
+            if is_plain_json(fp): open(fp, "w", encoding="utf-8").write(body)
+            else: skipped.append(os.path.relpath(fp, dst))   # encrypted mirror (JianYing-style Windows layout)
+    if skipped:
+        print(f"  ! ไฟล์สำรองที่ถูกเข้ารหัสไม่ได้ถูกแก้: {', '.join(skipped)} - ถ้าเปิด project ใหม่แล้วเห็นคลิปยังไม่ถูกตัด แจ้งผู้พัฒนา skill")
     mini = os.path.join(tdir, D["id"], "attachment", "patch", "mini_draft.json")
     if os.path.exists(mini): os.remove(mini)   # cached preview of the uncut timeline
     now = int(time.time() * US)
     new_draft_id = swap.get(meta.get("draft_id"), uid())
-    if os.path.exists(meta_p):
-        meta = json.load(open(meta_p, encoding="utf-8"))
-        meta.update(draft_fold_path=dst, draft_name=name, draft_id=new_draft_id, tm_duration=us(tl),
+    if os.path.exists(meta_p) and is_plain_json(meta_p):
+        meta = jload(meta_p)
+        meta.update(draft_fold_path=path_like(meta.get("draft_fold_path"), dst), draft_name=name, draft_id=new_draft_id, tm_duration=us(tl),
                     tm_draft_create=now, tm_draft_modified=now)
         json.dump(meta, open(meta_p, "w", encoding="utf-8"), ensure_ascii=False)
     rp = os.path.join(DRAFTS, "root_meta_info.json")   # CapCut's project list (backup first)
     if os.path.exists(rp):
         shutil.copy2(rp, rp + ".ncr-backup")
-        root = json.load(open(rp, encoding="utf-8"))
+        root = json.load(open(rp, encoding="utf-8-sig"))
         store = root.setdefault("all_draft_store", [])
-        tmpl = next((e for e in store if e.get("draft_fold_path") == src_dir), store[0] if store else {})
-        store[:] = [e for e in store if e.get("draft_fold_path") != dst]
+        same = lambda e, d: norm_path(e.get("draft_fold_path")) == norm_path(d)
+        tmpl = next((e for e in store if same(e, src_dir)), store[0] if store else {})
+        store[:] = [e for e in store if not same(e, dst)]
         e = copy.deepcopy(tmpl)
-        e.update(draft_fold_path=dst, draft_id=new_draft_id, draft_name=name, tm_duration=us(tl),
-                 draft_json_file=os.path.join(dst, dname), draft_cover=os.path.join(dst, "draft_cover.jpg"),
+        sty = lambda x: path_like(tmpl.get("draft_fold_path"), x)
+        e.update(draft_fold_path=sty(dst), draft_id=new_draft_id, draft_name=name, tm_duration=us(tl),
+                 draft_json_file=sty(os.path.join(dst, dname)), draft_cover=sty(os.path.join(dst, "draft_cover.jpg")),
                  tm_draft_create=now, tm_draft_modified=now)
         store.insert(0, e)
         root["draft_ids"] = root.get("draft_ids", 0) + 1

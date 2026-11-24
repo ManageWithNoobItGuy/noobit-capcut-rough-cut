@@ -12,10 +12,12 @@ CapCut project the user opens and finishes. The original project is never modifi
 - Tool: `scripts/ncr.py` (python3 stdlib only). Run `python3 <skill-dir>/scripts/ncr.py -h`.
 - Cutting rules (read before step 5): `references/cutting-rules.md`
 - **Talk to the user in Thai**, in plain words: the user is a beginner. Explain what is happening and how long it takes.
-- macOS only (CapCut for Windows encrypts its project files).
+- macOS (tested) and Windows (supported but **not yet tested on a real machine** - see "Windows notes" below,
+  and tell a Windows user so).
 
 Below, `NCR` means `python3 <skill-dir>/scripts/ncr.py` with the real absolute path. In zsh, a variable holding a
 command with spaces does not split, so define a function instead: `ncr(){ python3 "/abs/path/scripts/ncr.py" "$@"; }`.
+On Windows (PowerShell) use `py -3` (or `python`): `function ncr { py -3 "C:\abs\path\scripts\ncr.py" @args }`.
 
 ## Progress checklist (show it at every step)
 
@@ -39,17 +41,24 @@ task/plan/todo tool, mirror the same 8 steps there too.
 ```
 NCR doctor --install
 ```
-Checks macOS, Python, Homebrew, ffmpeg/ffprobe, whisper-cli and the Thai speech model (`ggml-large-v3.bin`, 3.1 GB in
+Checks the OS, Python, the package manager (Homebrew / winget), ffmpeg/ffprobe, whisper-cli and the Thai speech model (`ggml-large-v3.bin`, 3.1 GB in
 `~/models/`), and the CapCut projects folder. With `--install` it runs `brew install ffmpeg whisper-cpp` for what is
 missing and downloads the model (resumable).
 
 - The model download is long (3.1 GB, ~5-30 min): run the command **in the background** and tell the user. If it
   fails or the network drops, run it again - it continues where it stopped.
-- **Exit code 2 = Homebrew is missing.** Homebrew needs the user's Mac password, so you cannot install it. Show the
+- macOS installs with `brew install ffmpeg whisper-cpp`. Windows installs ffmpeg with `winget install Gyan.FFmpeg`
+  and the official prebuilt whisper.cpp (`whisper-bin-x64.zip` from github.com/ggml-org/whisper.cpp releases) into
+  `%LOCALAPPDATA%\noobit-rough-cut\whisper\Release\whisper-cli.exe` (+ the MSVC runtime if the exe cannot start).
+- **Exit code 2 on macOS = Homebrew is missing.** Homebrew needs the user's Mac password, so you cannot install it. Show the
   user the one-line installer the command prints, ask them to paste it into the **Terminal** app and press Enter,
   type their Mac password when asked (nothing appears while typing - that is normal), and tell you when it is done.
   Then run `doctor --install` again.
-- Exit code 3 = not macOS: stop and explain.
+- **Exit code 2 on Windows = winget is missing**: ask the user to install/update "App Installer" from the
+  Microsoft Store, open a new PowerShell window, then run `doctor --install` again.
+- On Windows, a freshly installed ffmpeg may only be found in a NEW shell: if the re-check still shows ❌ ffmpeg,
+  ask the user to restart the agent/terminal and run `doctor` again.
+- Exit code 3 = neither macOS nor Windows: stop and explain.
 - No CapCut projects folder: ask the user to install CapCut and create one project first.
 - Do not continue until the last line says `พร้อมใช้งานครบแล้ว ✅`.
 
@@ -69,7 +78,7 @@ NCR projects
 Lists projects (newest first) with their length, and says whether CapCut is open. Ask which project to cut
 (offer the top few names as options). Names ending in "rough cut vN" are this skill's own outputs.
 
-Then **alert the user**: "ก่อนสร้าง project ใหม่ ต้องปิดโปรแกรม CapCut ก่อนนะครับ (กด Cmd+Q) เพราะตอนปิด CapCut จะเขียน
+Then **alert the user**: "ก่อนสร้าง project ใหม่ ต้องปิดโปรแกรม CapCut ก่อนนะครับ (Mac: กด Cmd+Q / Windows: กด X แล้วเช็กว่าไม่มีไอคอน CapCut ค้างที่ taskbar มุมขวาล่าง) เพราะตอนปิด CapCut จะเขียน
 รายการ project ทับ ทำให้ project ใหม่หายไป ระหว่างนี้ไม่ต้องเปิด CapCut จนกว่าผมจะบอกครับ"
 **Never quit or kill CapCut yourself.** `NCR capcut` checks (exit 1 = still open). Analysis in step 4 only reads,
 so it may start while CapCut is still open; only step 6 needs it closed.
@@ -135,7 +144,28 @@ Make sure CapCut is still closed before each rebuild.
 
 ## Limits
 
-- macOS + CapCut desktop with plain-JSON projects (`draft_info.json` / `draft_content.json`).
+- macOS (tested) and Windows (untested) + CapCut desktop with plain-JSON projects (`draft_info.json` / `draft_content.json`).
+  剪映 / JianYing 6.0+ (the Chinese build) encrypts its projects: `projects` marks them 🔒 and `prepare` stops (exit 5).
+
+## Windows notes (written from research, not yet tested on a real Windows machine)
+
+| | macOS | Windows |
+|---|---|---|
+| Run the script | `python3 ncr.py …` | `py -3 ncr.py …` (or `python`) in PowerShell |
+| Install tools | Homebrew | winget (`Gyan.FFmpeg`) + whisper.cpp zip from GitHub |
+| CapCut projects | `~/Movies/CapCut/User Data/Projects/com.lveditor.draft` | `%LOCALAPPDATA%\CapCut\User Data\Projects\com.lveditor.draft` |
+| Work files / report | `~/Movies/noobit-rough-cut/` | `%USERPROFILE%\Videos\noobit-rough-cut\` |
+| Is CapCut open? | `pgrep` | `tasklist` (CapCut.exe / JianyingPro.exe) |
+
+- If CapCut's draft location was changed (CapCut settings), set `NCR_DRAFTS` to that folder (`$env:NCR_DRAFTS="D:\…\com.lveditor.draft"`).
+- The script already handles: UTF-8 output on the Windows console, Thai text from whisper, `C:\` paths inside ffmpeg
+  filters (relative names + working dir), ASCII-only work-folder names (whisper.cpp on Windows cannot open Thai
+  paths), Windows-style or `C:/` paths inside `root_meta_info.json`, and drafts where `draft_info.json` is plain JSON
+  next to encrypted mirrors (the mirrors are left untouched, with a warning).
+- Still a risk: a Windows **user name with Thai letters** puts the model (`%USERPROFILE%\models`) on a non-ASCII path.
+  If whisper fails to load it, move `ggml-large-v3.bin` to an ASCII folder (e.g. `C:\models`) and set `NCR_WHISPER_MODEL`.
+- When the first Windows user runs it, ask them to report: does the new project appear in CapCut, open, and play
+  the cut correctly? (Then update this section.)
 - Only the main video track is cut; clips with speed changes are passed through uncut.
 - Thai transcription only (whisper `--language th`).
 - Do the rough cut before adding text, music or effects: items on other tracks keep their original times.

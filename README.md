@@ -5,7 +5,7 @@
 
 ทำโดยช่อง **[บริหารงานแบบคนไอที (noobitguy)](https://www.youtube.com/@noobitguy)** ใช้วิธีตัดแบบเดียวกับที่ผมใช้ตัดคลิปจริงในช่อง
 
-> *English summary: an AI-agent skill (Claude Code, Codex, Antigravity) that rough-cuts Thai speech in a CapCut desktop project on macOS. It installs its own dependencies (ffmpeg, whisper.cpp, the large-v3 model), transcribes locally, removes pauses, stumbles, false starts, repeated takes and filler words, trims whole off-topic blocks when the clip must fit a target length, and writes a new CapCut project next to the original. Nothing is rendered.*
+> *English summary: an AI-agent skill (Claude Code, Codex, Antigravity) that rough-cuts Thai speech in a CapCut desktop project on macOS (tested) and Windows (supported, not yet tested). It installs its own dependencies (ffmpeg, whisper.cpp, the large-v3 model), transcribes locally, removes pauses, stumbles, false starts, repeated takes and filler words, trims whole off-topic blocks when the clip must fit a target length, and writes a new CapCut project next to the original. Nothing is rendered.*
 
 ---
 
@@ -38,12 +38,13 @@
 
 | | |
 |---|---|
-| เครื่อง | **Mac** (macOS) พื้นที่ว่างอย่างน้อย ~5 GB |
-| CapCut | เวอร์ชัน Desktop สำหรับ Mac |
+| เครื่อง | **Mac** หรือ **Windows 10/11** พื้นที่ว่างอย่างน้อย ~5 GB |
+| CapCut | CapCut Desktop (เวอร์ชันสากลจาก capcut.com) ส่วน 剪映/JianYing เวอร์ชันจีน 6.0+ เข้ารหัสไฟล์ project ไว้ ใช้ไม่ได้ |
 | AI Agent | [Claude Code](https://claude.com/claude-code) (แนะนำ) หรือ Codex / Antigravity |
-| อื่นๆ | ffmpeg, whisper.cpp และโมเดลเสียงภาษาไทย → **skill ติดตั้งให้เอง** |
+| อื่นๆ | Python, ffmpeg, whisper.cpp และโมเดลเสียงภาษาไทย → **skill ติดตั้งให้เอง** |
 
-⚠️ ตอนนี้ **ทดสอบแล้วเฉพาะบน macOS** ส่วน Windows กำลังเพิ่มการรองรับ (ยังไม่ได้ทดสอบบนเครื่องจริง)
+⚠️ ตอนนี้ **ทดสอบแล้วเฉพาะบน macOS** ส่วน Windows เขียนรองรับไว้แล้วแต่ **ยังไม่ได้ทดสอบบนเครื่องจริง**
+ถ้าคุณใช้ Windows แล้วเจอปัญหา (หรือใช้ได้!) ฝากเปิด [Issue](https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut/issues) บอกหน่อยครับ
 
 ---
 
@@ -57,7 +58,9 @@
 ช่วยติดตั้ง skill จาก https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut ให้หน่อย
 ```
 
-**วิธีที่ 2: ติดตั้งเองผ่าน Terminal**
+**วิธีที่ 2: ติดตั้งเอง**
+
+Mac (แอป Terminal):
 
 ```bash
 git clone https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut.git
@@ -67,13 +70,24 @@ git clone https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut.git
 cd noobit-capcut-rough-cut && ./install.sh
 ```
 
+Windows (PowerShell): ถ้าไม่มี git ให้กด **Code → Download ZIP** แล้วแตกไฟล์ จากนั้นเปิด PowerShell ในโฟลเดอร์นั้น
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+`install.ps1` ติดตั้ง Python ผ่าน winget ให้ถ้ายังไม่มี (ใส่ `-All` / `-Deps` ได้เหมือน `install.sh`)
+
 - `./install.sh` คัดลอก skill ไปที่ `~/.claude/skills/noobit-capcut-rough-cut` แล้วเช็กว่าโปรแกรมครบไหม
 - `./install.sh --all` ติดตั้งให้ Codex และ Antigravity ด้วย
 - `./install.sh --deps` ติดตั้ง ffmpeg, whisper.cpp และโหลดโมเดลภาษาไทย (3 GB) ไว้ก่อนเลย
   (ถ้าไม่ใส่ AI จะติดตั้งให้ตอนใช้งานครั้งแรก)
 
-> 💡 ถ้าเครื่องยังไม่มี **Homebrew** (ตัวช่วยลงโปรแกรมบน Mac) AI จะให้คำสั่ง 1 บรรทัดมาวางใน Terminal
+> 💡 Mac: ถ้ายังไม่มี **Homebrew** (ตัวช่วยลงโปรแกรมบน Mac) AI จะให้คำสั่ง 1 บรรทัดมาวางใน Terminal
 > เพราะต้องใส่รหัสผ่านเครื่อง ตอนพิมพ์รหัสจะไม่มีตัวอักษรขึ้น เป็นเรื่องปกติครับ
+>
+> 💡 Windows: ใช้ **winget** ที่มากับ Windows 10/11 ติดตั้ง ffmpeg ส่วน whisper.cpp ดาวน์โหลดตัวทางการจาก GitHub ให้เอง
+> ถ้าเครื่องไม่มี winget ให้ติดตั้ง **App Installer** จาก Microsoft Store ก่อน
 
 ## 🎞️ Step 2: เตรียม Project ใน CapCut
 
@@ -81,7 +95,7 @@ cd noobit-capcut-rough-cut && ./install.sh
 2. Import คลิปที่อัดมา แล้ว **ลากลง Timeline** (คลิปเดียวบน track หลักคือแบบปกติ)
 3. ยังไม่ต้องใส่ข้อความ เพลง หรือเอฟเฟกต์ (ให้ตัด rough cut ก่อน)
 4. จำชื่อ project ไว้ (ชื่อที่เห็นในหน้าแรกของ CapCut เช่น `1122`)
-5. **ปิด CapCut** (Cmd+Q) ก่อนให้ AI สร้าง project ใหม่
+5. **ปิด CapCut** ก่อนให้ AI สร้าง project ใหม่ (Mac: Cmd+Q / Windows: กด X แล้วเช็กว่าไม่มีไอคอนค้างที่ taskbar)
 
 ## ✂️ Step 3: สั่งตัด
 
@@ -107,14 +121,16 @@ AI จะถาม 2 เรื่อง:
 3. ไม่ชอบตรงไหน แก้เองใน CapCut ได้เลย หรือบอก AI ให้แก้ แล้วตัดเป็น v2
 4. ใส่ข้อความ เพลง เอฟเฟกต์ต่อได้ตามสบาย
 
-รายงานสรุปอยู่ที่ `~/Movies/noobit-rough-cut/<ชื่อ project>/<ชื่อ>_rough_cut_v1_report.md`
+รายงานสรุปอยู่ที่ `~/Movies/noobit-rough-cut/<ชื่อ project>/` (Windows: `Videos\noobit-rough-cut\<ชื่อ project>\`)
 บอกความยาวก่อน/หลังตัด, ทุกจุดที่ตัด และเวลาในคลิปใหม่ที่ควรเปิดฟัง
 
 ---
 
 ## 🤖 สำหรับ AI Agent (Installation instructions for AI agents)
 
-If a user asks you to install this skill, do exactly this (macOS):
+If a user asks you to install this skill, do exactly this.
+
+**macOS:**
 
 ```bash
 git clone --depth 1 https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut.git /tmp/noobit-capcut-rough-cut
@@ -124,13 +140,27 @@ git clone --depth 1 https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-c
 sh /tmp/noobit-capcut-rough-cut/install.sh
 ```
 
-- Codex / Antigravity users: run `install.sh --all` instead (copies to `~/.codex/skills` and `~/.gemini/antigravity/skills` too).
+**Windows (PowerShell)** - status: supported but not yet tested on a real machine; tell the user so:
+
+```powershell
+git clone --depth 1 https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut.git "$env:TEMP\noobit-capcut-rough-cut"
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\noobit-capcut-rough-cut\install.ps1"
+```
+
+(No git? Download `https://github.com/ManageWithNoobItGuy/noobit-capcut-rough-cut/archive/refs/heads/main.zip`, unzip, run `install.ps1` from it.)
+`install.ps1` installs Python 3.12 with winget if needed. On Windows the script runs as `py -3 scripts\ncr.py`.
+
+- Codex / Antigravity users: run `install.sh --all` / `install.ps1 -All` instead (copies to `~/.codex/skills` and `~/.gemini/antigravity/skills` too).
 - Other agents: copy `SKILL.md`, `scripts/` and `references/` into your agent's skills folder as `noobit-capcut-rough-cut/`.
 - The skill entry point is `SKILL.md`. It drives an 8-step workflow with `python3 scripts/ncr.py` (stdlib only).
-- Dependencies are installed on first use by `python3 scripts/ncr.py doctor --install`
-  (Homebrew `ffmpeg` + `whisper-cpp`, and `ggml-large-v3.bin` 3.1 GB into `~/models/`).
-  If Homebrew itself is missing, the command exits with code 2 and prints the official installer line:
-  the user must run that in Terminal (it needs their password). Do not try to run it for them.
+- Dependencies are installed on first use by `ncr.py doctor --install`:
+  macOS → Homebrew `ffmpeg` + `whisper-cpp`; Windows → `winget install Gyan.FFmpeg` + the official prebuilt
+  whisper.cpp zip from github.com/ggml-org/whisper.cpp; both → `ggml-large-v3.bin` 3.1 GB into `~/models/`.
+  Exit code 2 = the package manager is missing (macOS: Homebrew - the user must run the printed installer line in
+  Terminal because it needs their password, do not run it for them; Windows: install "App Installer" from the Microsoft Store).
 - Never quit CapCut on the user's behalf: ask them to quit it before `build`.
 - After installing, tell the user (in Thai) how to start: `/noobit-capcut-rough-cut ฝากตัด rough cut คลิปใน CapCut ให้หน่อย`
 
@@ -166,7 +196,7 @@ python3 scripts/ncr.py compare "1122 rough cut v1" # เทียบกับท
 ```
 
 ไฟล์ทำงานอยู่ที่ `~/Movies/noobit-rough-cut/<ชื่อ project>/.ncr/`
-ตัวแปรที่ปรับได้: `NCR_DRAFTS` (โฟลเดอร์ project CapCut), `NCR_HOME`, `NCR_WHISPER_MODEL`, `NCR_WHISPER_BIN`
+ตัวแปรที่ปรับได้: `NCR_DRAFTS` (โฟลเดอร์ project CapCut ถ้าเคยย้ายที่เก็บ draft), `NCR_HOME`, `NCR_WHISPER_MODEL`, `NCR_WHISPER_BIN`
 </details>
 
 ## 🎛️ ปรับให้เป็นสไตล์ของคุณ
